@@ -53,6 +53,17 @@ except Exception as _e:                                    # pragma: no cover
     print(f"[UI] WebGL front end unavailable ({_e}) — using fallback renderer.")
     _WEB_OK = False
 
+    # Optional system tray support for the WebView front end. Pillow is required
+    # for icon construction and pystray provides the tray integration. If not
+    # available, the UI will still work but no tray icon will be created.
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except Exception:
+        pystray = None
+        Image = None
+        ImageDraw = None
+
 
 def _free_port() -> int:
     s = socket.socket()
@@ -109,6 +120,12 @@ class _WebJarvisUI:
             background_color="#000000",
             easy_drag=False,
         )
+
+        # Create a system tray icon so the user can hide/restore the WebView.
+        try:
+            self._create_tray()
+        except Exception as e:
+            print(f"[UI] tray setup failed: {e}")
 
     # ── Socket link ───────────────────────────────────────────────────────────
 
@@ -192,7 +209,12 @@ class _WebJarvisUI:
             self._save_key((m.get("value") or "").strip())
 
         elif kind == "quit":
-            os._exit(0)
+            # Front-end requests quit: hide UI to tray instead of exiting the
+            # whole process so JARVIS keeps running in the background.
+            try:
+                self._hide_to_tray()
+            except Exception as e:
+                print(f"[UI] hide to tray failed: {e}")
 
     def _save_key(self, key: str):
         if not key:
@@ -228,6 +250,80 @@ class _WebJarvisUI:
     def write_log(self, text: str):
         print(f"[UI] {text}")
 
+    # ----------------- System tray integration -------------------------------
+    def _create_tray(self):
+        if pystray is None or Image is None:
+            self.write_log("SYS: Install 'pystray' and 'Pillow' to enable tray icon.")
+            return
+        if getattr(self, "_tray_icon", None) is not None:
+            return
+
+        # Build a simple circular icon using PIL
+        try:
+            img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse((8, 8, 56, 56), fill=(48, 198, 255, 255))
+        except Exception:
+            img = None
+
+        def _show_action(icon, item):
+            try:
+                # Show the WebView window. webview API supports show()/hide().
+                if self._window:
+                    try:
+                        self._window.show()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _hide_action(icon, item):
+            try:
+                self._hide_to_tray()
+            except Exception:
+                pass
+
+        def _exit_action(icon, item):
+            try:
+                icon.stop()
+            except Exception:
+                pass
+            os._exit(0)
+
+        menu = pystray.Menu(
+            pystray.MenuItem('Show J.A.R.V.I.S', _show_action),
+            pystray.MenuItem('Hide J.A.R.V.I.S', _hide_action),
+            pystray.MenuItem('Exit J.A.R.V.I.S', _exit_action),
+        )
+
+        icon = pystray.Icon('jarvis', img, 'J.A.R.V.I.S', menu)
+        self._tray_icon = icon
+        t = threading.Thread(target=icon.run, daemon=True)
+        t.start()
+
+    def _hide_to_tray(self):
+        # Attempt to hide the window rather than destroy it.
+        try:
+            if self._window:
+                try:
+                    self._window.hide()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.write_log("SYS: Web UI hidden (background).")
+
+    def _exit_from_tray(self):
+        try:
+            if getattr(self, "_tray_icon", None):
+                try:
+                    self._tray_icon.stop()
+                except Exception:
+                    pass
+            os._exit(0)
+        except Exception:
+            os._exit(0)
+
     def toggle_mute(self):
         self.muted = not self.muted
         self._send_now({"type": "state",
@@ -246,9 +342,17 @@ class _WebJarvisUI:
             time.sleep(0.05)
 
     def start(self):
-        """Blocks until the window closes. Must run on the main thread."""
+        """Blocks until the window closes. Must run on the main thread.
+
+        Note: do NOT exit the process when the WebView window closes — keep the
+        assistant running in the background. The Tk fallback already supports
+        hiding to tray; for the WebView front-end the window is frameless, so
+        closing it should not terminate the whole program.
+        """
         webview.start(debug=False)
-        os._exit(0)
+        # Don't exit the process so JARVIS continues running when the UI closes.
+        self.write_log("SYS: Web UI closed — continuing to run in background.")
+        return
 
 
 if _WEB_OK:

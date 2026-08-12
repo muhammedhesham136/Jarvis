@@ -35,6 +35,13 @@ from pathlib import Path
 import tkinter as tk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
+# Optional system tray support. pystray is not required; if absent, Jarvis
+# will still hide the window but won't create a tray icon to restore it.
+try:
+    import pystray
+except Exception:
+    pystray = None
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -115,7 +122,8 @@ class JarvisUI:
             self._show_setup()
 
         self._tick()
-        self.root.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
+        # Close window -> hide to tray (if available) so JARVIS keeps running in background
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Canvas & pre-rendered art ─────────────────────────────────────────────
 
@@ -248,7 +256,9 @@ class JarvisUI:
         r.bind("<F4>", lambda e: self.toggle_mute())
         r.bind("<F11>", lambda e: r.attributes(
             "-fullscreen", not r.attributes("-fullscreen")))
-        r.bind("<Control-q>", lambda e: os._exit(0))
+        # Ctrl+Q and Alt+F4 now hide to tray (or background) instead of force-exiting.
+        r.bind("<Control-q>", lambda e: self._on_close())
+        r.bind("<Alt-F4>", lambda e: self._on_close())
         r.bind("<Escape>", lambda e: self._hide_entry())
         r.bind("<Key>", self._on_key)
 
@@ -298,6 +308,82 @@ class JarvisUI:
     def wait_for_api_key(self):
         while not self._api_key_ready:
             time.sleep(0.05)
+
+    def _on_close(self):
+        """Handler for WM_DELETE_WINDOW: hide to tray if possible, otherwise exit."""
+        try:
+            self._hide_to_tray()
+        except Exception as e:
+            print(f"[UI] tray hide failed: {e}")
+            os._exit(0)
+
+    def _hide_to_tray(self):
+        """Withdraw the window and start a system tray icon (if pystray present).
+        The tray menu provides options to restore or exit JARVIS."""
+        # Hide the main window
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        self.write_log("SYS: JARVIS hidden (background).")
+
+        # If pystray is available, create a tray icon so the user can restore/exit.
+        if pystray is None:
+            self.write_log("SYS: Install 'pystray' to get a system tray icon (pip install pystray).")
+            return
+
+        if getattr(self, "_tray_icon", None) is not None:
+            return  # already running
+
+        # Build a simple circular icon using PIL
+        try:
+            img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse((8, 8, 56, 56), fill=(48, 198, 255, 255))
+        except Exception:
+            img = None
+
+        def _show_action(icon, item):
+            # icon callbacks happen on the tray thread; schedule on Tk thread
+            self.root.after(0, self._show_from_tray)
+
+        def _exit_action(icon, item):
+            self.root.after(0, self._exit_from_tray)
+
+        menu = pystray.Menu(
+            pystray.MenuItem('Show J.A.R.V.I.S', _show_action),
+            pystray.MenuItem('Exit J.A.R.V.I.S', _exit_action),
+        )
+
+        icon = pystray.Icon('jarvis', img, 'J.A.R.V.I.S', menu)
+        self._tray_icon = icon
+        t = threading.Thread(target=icon.run, daemon=True)
+        t.start()
+
+    def _show_from_tray(self):
+        try:
+            if getattr(self, "_tray_icon", None):
+                try:
+                    self._tray_icon.stop()
+                except Exception:
+                    pass
+                self._tray_icon = None
+            self.root.deiconify()
+            self.root.focus_set()
+            self.write_log("SYS: JARVIS restored.")
+        except Exception as e:
+            print(f"[UI] tray show failed: {e}")
+
+    def _exit_from_tray(self):
+        try:
+            if getattr(self, "_tray_icon", None):
+                try:
+                    self._tray_icon.stop()
+                except Exception:
+                    pass
+            os._exit(0)
+        except Exception:
+            os._exit(0)
 
     def start(self):
         """Blocks until the window closes. Must run on the main thread."""
