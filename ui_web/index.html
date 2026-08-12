@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J.A.R.V.I.S</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#000;overflow:hidden;cursor:none}
+  canvas{display:block;width:100%;height:100%}
+
+  #bar{
+    position:fixed;left:50%;bottom:9vh;transform:translateX(-50%) translateY(14px);
+    width:min(560px,44vw);opacity:0;pointer-events:none;
+    transition:opacity .18s ease,transform .18s ease;
+  }
+  #bar.on{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto}
+  #cmd{
+    width:100%;background:rgba(0,10,16,.72);border:0;outline:0;
+    border-bottom:1px solid rgba(60,200,255,.55);
+    color:#cdf4ff;font:400 15px/1.4 Consolas,"Courier New",monospace;
+    text-align:center;padding:11px 14px;letter-spacing:.04em;
+    text-shadow:0 0 12px rgba(60,200,255,.6);
+  }
+  #cmd::placeholder{color:rgba(120,200,225,.35)}
+
+  #setup{
+    position:fixed;inset:0;display:none;place-items:center;
+    background:rgba(0,0,0,.86);backdrop-filter:blur(3px);cursor:auto;
+  }
+  #setup.on{display:grid}
+  #setup .box{
+    border:1px solid rgba(60,200,255,.4);background:rgba(0,7,12,.9);
+    padding:34px 46px;text-align:center;
+  }
+  #setup h1{
+    color:#4ad2ff;font:700 17px/1 Consolas,monospace;letter-spacing:.42em;
+    margin-bottom:9px;text-shadow:0 0 18px rgba(60,200,255,.7);
+  }
+  #setup p{color:#2f7f99;font:400 11px/1.6 Consolas,monospace;margin-bottom:20px}
+  #key{
+    width:340px;background:#00060b;border:1px solid rgba(60,200,255,.25);
+    outline:0;color:#cdf4ff;font:400 12px Consolas,monospace;
+    text-align:center;padding:9px;letter-spacing:.05em;
+  }
+  #key:focus{border-color:rgba(60,200,255,.7)}
+  #go{
+    margin-top:18px;background:transparent;border:1px solid rgba(60,200,255,.45);
+    color:#4ad2ff;font:700 11px Consolas,monospace;letter-spacing:.25em;
+    padding:9px 26px;cursor:pointer;
+  }
+  #go:hover{background:rgba(60,200,255,.12)}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="bar"><input id="cmd" autocomplete="off" spellcheck="false" placeholder="speak, or type your order"></div>
+
+<div id="setup">
+  <div class="box">
+    <h1>JARVIS</h1>
+    <p>Gemini API key required to come online</p>
+    <input id="key" type="password" placeholder="paste key">
+    <br><button id="go">INITIALISE</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SHADERS
+   The reactor is drawn analytically rather than raymarched: each ring is a
+   tilted plane through the origin, so one ray/plane intersection per ring
+   gives true 3D perspective, and the core is an analytic glow integral.
+   Everything is emissive and accumulated additively, so there is no depth
+   sorting and no overdraw cost.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const VERT = `#version 300 es
+void main(){
+  // Fullscreen triangle — no vertex buffer needed.
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uLevel;
+uniform float uSpeak;
+uniform float uMute;
+uniform vec3  uColor;
+uniform float uBars[64];
+
+const float PI = 3.141592653589793;
+
+mat3 rotX(float a){ float c=cos(a), s=sin(a); return mat3(1.,0.,0.,  0.,c,-s,  0.,s,c); }
+mat3 rotY(float a){ float c=cos(a), s=sin(a); return mat3(c,0.,s,  0.,1.,0.,  -s,0.,c); }
+mat3 rotZ(float a){ float c=cos(a), s=sin(a); return mat3(c,-s,0.,  s,c,0.,  0.,0.,1.); }
+
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+/* One holographic ring lying in the XZ plane of its own rotated space. */
+float ring(vec3 ro, vec3 rd, mat3 m, float R, float w, float segs, float spin){
+  vec3 o = ro * m;              // rotation matrices are orthonormal, so
+  vec3 d = rd * m;              // v*m applies the inverse rotation
+  if (abs(d.y) < 1e-5) return 0.0;
+  float t = -o.y / d.y;
+  if (t <= 0.0) return 0.0;
+
+  vec3  p = o + d * t;
+  float r = length(p.xz);
+
+  float band = w / (abs(r - R) + w);
+  band = pow(band, 2.6);
+
+  float ang = atan(p.z, p.x);
+  float seg = fract(ang / (2.0 * PI) * segs + spin);
+  float mask = smoothstep(0.0, 0.09, seg) * smoothstep(1.0, 0.70, seg);
+
+  // Fade with distance so the far half of the ring reads as behind the core.
+  float depth = 1.0 / (1.0 + t * t * 0.05);
+  return band * mask * depth;
+}
+
+/* Audio-reactive spectrum, standing on the equatorial plane. */
+float spectrum(vec3 ro, vec3 rd, mat3 m, float R0, float len){
+  vec3 o = ro * m;
+  vec3 d = rd * m;
+  if (abs(d.y) < 1e-5) return 0.0;
+  float t = -o.y / d.y;
+  if (t <= 0.0) return 0.0;
+
+  vec3  p = o + d * t;
+  float r = length(p.xz);
+  if (r < R0 - 0.03 || r > R0 + len + 0.03) return 0.0;
+
+  float a  = atan(p.z, p.x) / (2.0 * PI) + 0.5;
+  float fi = a * 64.0;
+  int   i  = int(floor(clamp(fi, 0.0, 63.0)));
+  float fr = fract(fi);
+
+  float gap = smoothstep(0.0, 0.22, fr) * smoothstep(1.0, 0.78, fr);
+  float h   = R0 + len * uBars[i];
+
+  float inside = smoothstep(h, h - 0.02, r) * smoothstep(R0 - 0.01, R0 + 0.012, r);
+  float tip    = exp(-abs(r - h) * 90.0) * 1.6;   // bright cap on each bar
+  float depth  = 1.0 / (1.0 + t * t * 0.05);
+
+  return (inside * gap * 0.55 + tip * gap) * depth;
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
+  float T = uTime;
+
+  // Camera drifts a little so the scene never looks frozen.
+  float orbit = sin(T * 0.07) * 0.16;
+  vec3  ro = vec3(sin(orbit) * 3.05, 0.60 + sin(T * 0.11) * 0.05, cos(orbit) * 3.05);
+  vec3  fw = normalize(-ro);
+  vec3  rt = normalize(cross(vec3(0.0, 1.0, 0.0), fw));
+  vec3  up = cross(fw, rt);
+  vec3  rd = normalize(uv.x * rt + uv.y * up + 1.75 * fw);
+
+  float energy = mix(0.62, 1.15, uLevel);
+  float spin   = mix(0.6, 2.4, uSpeak) * (1.0 - uMute * 0.85);
+  float S      = T * spin;
+
+  // ── Rings ────────────────────────────────────────────────────────────────
+  float g = 0.0;
+  g += ring(ro, rd, rotX(1.30) * rotZ( S * 0.21),            1.00, 0.010, 3.0,  S * 0.05) * 1.15;
+  g += ring(ro, rd, rotX(1.30) * rotZ(-S * 0.15),            0.86, 0.007, 6.0, -S * 0.07) * 0.85;
+  g += ring(ro, rd, rotX(1.44) * rotY( S * 0.12),            1.16, 0.005, 2.0,  S * 0.03) * 0.55;
+  g += ring(ro, rd, rotZ(1.57) * rotY( S * 0.27) * rotX(0.3), 0.72, 0.006, 4.0,  S * 0.09) * 0.70;
+  g += ring(ro, rd, rotX(0.18) * rotY(-S * 0.19),            0.55, 0.009, 1.0,  0.0)      * 0.60;
+
+  // ── Spectrum ─────────────────────────────────────────────────────────────
+  float sp = spectrum(ro, rd, rotX(1.5708), 0.30, 0.20);
+
+  // ── Core ─────────────────────────────────────────────────────────────────
+  float dc = length(ro - rd * dot(ro, rd));            // ray's closest approach
+  float pulse = 0.80 + 0.20 * sin(T * 1.6) + uLevel * 0.55;
+  float core = 0.0;
+  core += 1.00 / (1.0 + pow(dc / (0.070 * pulse), 3.2));
+  core += 0.42 / (1.0 + pow(dc / (0.190 * pulse), 2.2));
+  core += 0.16 / (1.0 + pow(dc / (0.520 * pulse), 1.7));
+
+  // ── Compose ──────────────────────────────────────────────────────────────
+  vec3 col = uColor * ((g * energy * 1.25) + sp * 1.30 + core * 1.15);
+  col += vec3(1.0) * pow(core, 3.0) * 0.42;            // white-hot centre
+  col += uColor * pow(max(0.0, 1.0 - dc), 12.0) * 0.10;
+
+  // Faint holographic scanlines and a vignette to seat it in the dark.
+  col *= 1.0 - 0.05 * sin(gl_FragCoord.y * 1.9 + T * 2.2);
+  col *= 1.0 - 0.30 * dot(uv, uv) * 0.28;
+
+  col = vec3(1.0) - exp(-col * 1.20);                  // tonemap
+  col += (hash(gl_FragCoord.xy + fract(T)) - 0.5) / 255.0;   // dither
+
+  fragColor = vec4(col, 1.0);
+}`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GL SETUP
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", {
+  antialias: false, alpha: false, depth: false,
+  powerPreference: "high-performance",
+});
+
+if (!gl) {
+  document.body.innerHTML =
+    '<div style="color:#4ad2ff;font:14px Consolas;display:grid;place-items:center;height:100%">' +
+    'WebGL2 unavailable</div>';
+  throw new Error("no webgl2");
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(s) || "shader compile failed");
+  }
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  throw new Error(gl.getProgramInfoLog(prog) || "link failed");
+}
+gl.useProgram(prog);
+gl.bindVertexArray(gl.createVertexArray());
+
+const U = {
+  res:   gl.getUniformLocation(prog, "uRes"),
+  time:  gl.getUniformLocation(prog, "uTime"),
+  level: gl.getUniformLocation(prog, "uLevel"),
+  speak: gl.getUniformLocation(prog, "uSpeak"),
+  mute:  gl.getUniformLocation(prog, "uMute"),
+  color: gl.getUniformLocation(prog, "uColor"),
+  // Some drivers only expose an array uniform under its "[0]" name.
+  bars:  gl.getUniformLocation(prog, "uBars") ||
+         gl.getUniformLocation(prog, "uBars[0]"),
+};
+
+// Cap the render scale so a 4K display does not cost us frames.
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const w = Math.floor(innerWidth * dpr);
+  const h = Math.floor(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    gl.viewport(0, 0, w, h);
+  }
+}
+addEventListener("resize", resize);
+resize();
+
+/* ══════════════════════════════════════════════════════════════════════════
+   STATE
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const PALETTE = {
+  LISTENING:    [0.19, 0.78, 1.00],
+  SPEAKING:     [0.62, 0.92, 1.00],
+  THINKING:     [1.00, 0.65, 0.17],
+  PROCESSING:   [1.00, 0.65, 0.17],
+  MUTED:        [1.00, 0.18, 0.33],
+  INITIALISING: [0.12, 0.35, 0.45],
+};
+
+const NB = 64;
+const bars  = new Float32Array(NB);
+const phase = new Float32Array(NB);
+for (let i = 0; i < NB; i++) phase[i] = (i * 2.39996323) % (Math.PI * 2);
+
+let state    = "INITIALISING";
+let muted    = false;
+let tgtLevel = 0;
+let level    = 0;
+let speak    = 0;
+const col    = [...PALETTE.INITIALISING];
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RENDER LOOP
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const t0 = performance.now();
+
+function frame(now) {
+  const T = (now - t0) / 1000;
+  resize();
+
+  const speaking = state === "SPEAKING";
+  const thinking = state === "THINKING" || state === "PROCESSING";
+
+  let want;
+  if (muted)          want = 0.0;
+  else if (speaking)  want = tgtLevel;
+  else if (thinking)  want = 0.22 + 0.10 * Math.sin(T * 5.5);
+  else                want = 0.07 + 0.03 * Math.sin(T * 1.9);
+
+  level += (want - level) * (speaking ? 0.42 : 0.10);
+  speak += ((speaking ? 1 : 0) - speak) * 0.08;
+
+  const target = PALETTE[muted ? "MUTED" : state] || PALETTE.LISTENING;
+  for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * 0.06;
+
+  for (let i = 0; i < NB; i++) {
+    const wob = 0.55 + 0.45 * Math.sin(T * 4.4 + phase[i] * 2.7);
+    const tgt = 0.05 + level * wob;
+    bars[i] += (tgt - bars[i]) * 0.30;
+  }
+
+  gl.uniform2f(U.res, canvas.width, canvas.height);
+  gl.uniform1f(U.time, T);
+  gl.uniform1f(U.level, level);
+  gl.uniform1f(U.speak, speak);
+  gl.uniform1f(U.mute, muted ? 1 : 0);
+  gl.uniform3f(U.color, col[0], col[1], col[2]);
+  gl.uniform1fv(U.bars, bars);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LINK TO PYTHON
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const PORT = new URLSearchParams(location.search).get("port");
+let sock = null;
+
+function send(obj) {
+  if (sock && sock.readyState === 1) sock.send(JSON.stringify(obj));
+}
+
+function connect() {
+  if (!PORT) return;
+  try {
+    sock = new WebSocket("ws://127.0.0.1:" + PORT);
+  } catch (e) {
+    setTimeout(connect, 800);
+    return;
+  }
+
+  sock.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+
+    if (m.type === "state") {
+      state    = m.state || state;
+      muted    = !!m.muted;
+      tgtLevel = typeof m.level === "number" ? m.level : tgtLevel;
+    } else if (m.type === "need_key") {
+      setup.classList.add("on");
+      document.body.style.cursor = "auto";
+      key.focus();
+    } else if (m.type === "key_ok") {
+      setup.classList.remove("on");
+      document.body.style.cursor = "none";
+    }
+  };
+
+  // The assistant keeps running even if this window drops; just reconnect.
+  sock.onclose = () => setTimeout(connect, 800);
+  sock.onerror = () => { try { sock.close(); } catch (e) {} };
+}
+connect();
+
+/* ══════════════════════════════════════════════════════════════════════════
+   INPUT — the command bar stays hidden until you start typing
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const bar   = document.getElementById("bar");
+const cmd   = document.getElementById("cmd");
+const setup = document.getElementById("setup");
+const key   = document.getElementById("key");
+const go    = document.getElementById("go");
+
+function showBar(seed) {
+  bar.classList.add("on");
+  document.body.style.cursor = "auto";
+  cmd.value = seed || "";
+  cmd.focus();
+}
+
+function hideBar() {
+  bar.classList.remove("on");
+  cmd.value = "";
+  cmd.blur();
+  document.body.style.cursor = "none";
+}
+
+cmd.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Enter") {
+    const text = cmd.value.trim();
+    hideBar();
+    if (text) send({ type: "cmd", text });
+  } else if (e.key === "Escape") {
+    hideBar();
+  }
+});
+
+addEventListener("keydown", (e) => {
+  if (setup.classList.contains("on")) return;
+
+  if (e.key === "F4") { muted = !muted; send({ type: "mute", value: muted }); return; }
+  if (e.key === "Escape") { hideBar(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === "q") { send({ type: "quit" }); return; }
+
+  if (!bar.classList.contains("on") && e.key.length === 1 && !e.ctrlKey && !e.altKey) {
+    showBar(e.key);
+    e.preventDefault();
+  }
+});
+
+function submitKey() {
+  const v = key.value.trim();
+  if (v) send({ type: "key", value: v });
+}
+go.addEventListener("click", submitKey);
+key.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Enter") submitKey();
+});
+</script>
+</body>
+</html>

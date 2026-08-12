@@ -1,0 +1,23 @@
+# Secrets — this file holds your live Gemini API key
+config/api_keys.json
+
+# Personal long-term memory
+memory/long_term.json
+
+# Environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Scratch space used by do_anything
+_scratch/
+_backup_original/
+
+# OS / editor
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
