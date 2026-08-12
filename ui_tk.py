@@ -335,13 +335,26 @@ class JarvisUI:
         if getattr(self, "_tray_icon", None) is not None:
             return  # already running
 
-        # Build a simple circular icon using PIL
+        # Prefer a shipped tray icon if present
+        img = None
         try:
-            img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            d.ellipse((8, 8, 56, 56), fill=(48, 198, 255, 255))
+            asset = BASE_DIR / "assets" / "tray_icon.png"
+            if asset.exists():
+                try:
+                    img = Image.open(asset)
+                except Exception:
+                    img = None
         except Exception:
             img = None
+
+        # Fall back to programmatically drawing a simple icon if no asset
+        if img is None:
+            try:
+                img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+                d = ImageDraw.Draw(img)
+                d.ellipse((8, 8, 56, 56), fill=(48, 198, 255, 255))
+            except Exception:
+                img = None
 
         def _show_action(icon, item):
             # icon callbacks happen on the tray thread; schedule on Tk thread
