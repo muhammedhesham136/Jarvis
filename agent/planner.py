@@ -193,7 +193,7 @@ def create_plan(goal: str, context: str = "") -> dict:
     genai.configure(api_key=_get_api_key())
     import json
     cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-    model_name = cfg.get("model_name", "gemini-2.5-flash")
+    model_name = cfg.get("model_name", "gemini-3.5-flash")
     model = genai.GenerativeModel(model_name)
 
     # The compat shim takes no system_instruction, so the planning rules and
@@ -253,7 +253,7 @@ def replan(goal: str, completed_steps: list, failed_step: dict, error: str) -> d
 
     genai.configure(api_key=_get_api_key())
     model = genai.GenerativeModel(
-      "gemini-2.5-flash"
+      "gemini-3.5-flash"
     )
 
     completed_summary = "\n".join(

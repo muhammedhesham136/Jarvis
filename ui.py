@@ -32,6 +32,8 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from tray import Tray
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -50,7 +52,26 @@ try:
     from websockets.asyncio.server import serve as ws_serve
     _WEB_OK = True
 except Exception as _e:                                    # pragma: no cover
-    print(f"[UI] WebGL front end unavailable ({_e}) — using fallback renderer.")
+    # stderr, flushed, ASCII: stdout is block-buffered once redirected and the
+    # Tk fallback leaves through os._exit(), which never flushes it — a message
+    # on stdout can be scrolled away by the later imports or lost outright.
+    print(
+        "\n" + "=" * 72 + "\n"
+        "  JARVIS IS RUNNING WITHOUT THE 3D WebGL INTERFACE\n"
+        + "-" * 72 + "\n"
+        f"  reason      : {_e}\n"
+        f"  python used : {sys.executable}\n"
+        "\n"
+        "  FIX: quit and start JARVIS with  run.bat  -- it launches\n"
+        "       .venv\\Scripts\\python.exe, where the WebGL packages are.\n"
+        "\n"
+        "  If the interpreter above is already the one you want, then that\n"
+        "  package really is missing from it -- install it there:\n"
+        f'      "{sys.executable}" -m pip install pywebview\n'
+        "      (or -m pip install -r requirements.txt for all of them)\n"
+        + "=" * 72 + "\n",
+        file=sys.stderr, flush=True,
+    )
     _WEB_OK = False
 
 
@@ -83,6 +104,16 @@ class _WebJarvisUI:
         self._level = 0.0
         self._api_key_ready = API_FILE.exists()
 
+        # Tray / background state.
+        self._quitting     = False   # True only for a real exit
+        self._tray_notified = False  # one-shot "still listening" balloon
+        self._tray = Tray(
+            on_show=self._show_window,
+            on_quit=self._quit,
+            on_toggle_mute=self.toggle_mute,
+            is_muted=lambda: self.muted,
+        )
+
         self._clients: set = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._port = _free_port()
@@ -109,6 +140,13 @@ class _WebJarvisUI:
             background_color="#000000",
             easy_drag=False,
         )
+
+        # Native close (Alt+F4 / WM_CLOSE) hides to the tray rather than
+        # exiting — but only if the tray is actually there to bring it back.
+        try:
+            self._window.events.closing += self._on_closing
+        except Exception:
+            pass
 
     # ── Socket link ───────────────────────────────────────────────────────────
 
@@ -185,14 +223,18 @@ class _WebJarvisUI:
 
         elif kind == "mute":
             self.muted = bool(m.get("value"))
+            self._tray.refresh()
             self.write_log("SYS: Microphone muted." if self.muted
                            else "SYS: Microphone live.")
 
         elif kind == "key":
             self._save_key((m.get("value") or "").strip())
 
+        elif kind == "hide":
+            self._hide_window()
+
         elif kind == "quit":
-            os._exit(0)
+            self._quit()
 
     def _save_key(self, key: str):
         if not key:
@@ -205,7 +247,7 @@ class _WebJarvisUI:
             except Exception:
                 data = {}
         data["gemini_api_key"] = key
-        data.setdefault("model_name", "gemini-2.5-flash")
+        data.setdefault("model_name", "gemini-3.5-flash")
         API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
         self._api_key_ready = True
@@ -230,6 +272,7 @@ class _WebJarvisUI:
 
     def toggle_mute(self):
         self.muted = not self.muted
+        self._tray.refresh()
         self._send_now({"type": "state",
                         "state": "MUTED" if self.muted else self._state,
                         "muted": self.muted, "level": self._level})
@@ -245,9 +288,48 @@ class _WebJarvisUI:
         while not self._api_key_ready:
             time.sleep(0.05)
 
+    # ── Tray / background ─────────────────────────────────────────────────────
+
+    def _show_window(self):
+        try:
+            self._window.show()
+            self._window.on_top = True
+            self._window.on_top = False
+        except Exception:
+            pass
+
+    def _hide_window(self):
+        """Drop to the tray and keep listening. Full exit if no tray exists."""
+        if not self._tray.available:
+            self._quit()
+            return
+        try:
+            self._window.hide()
+        except Exception:
+            pass
+        if not self._tray_notified:
+            self._tray.notify(
+                "Still listening. Right-click the tray icon to show or quit.")
+            self._tray_notified = True
+        self.write_log("SYS: Minimised to tray — still listening.")
+
+    def _on_closing(self, *_):
+        """Window-manager close: hide instead of exit, unless truly quitting."""
+        if self._quitting or not self._tray.available:
+            return True
+        self._hide_window()
+        return False
+
+    def _quit(self):
+        self._quitting = True
+        self._tray.stop()
+        os._exit(0)
+
     def start(self):
-        """Blocks until the window closes. Must run on the main thread."""
+        """Blocks until a real quit. Must run on the main thread."""
+        self._tray.start()
         webview.start(debug=False)
+        # webview.start() only returns on a genuine window teardown.
         os._exit(0)
 
 

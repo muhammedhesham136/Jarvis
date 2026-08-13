@@ -52,6 +52,15 @@ _APP_ALIASES = {
 }
 
 
+def _remember(app_name: str) -> None:
+    """Record the launch so later steps know the app is already open."""
+    try:
+        from core import desktop_state
+        desktop_state.note_opened(app_name)
+    except Exception:
+        pass
+
+
 def _normalize(raw: str) -> str:
     system = platform.system()
     key    = raw.lower().strip()
@@ -181,6 +190,17 @@ def open_app(
     if launcher is None:
         return f"Unsupported OS: {system}"
 
+    # Already open? Continue from there rather than launching a second copy.
+    try:
+        from core import desktop_state
+        if desktop_state.focus(app_name):
+            print(f"[open_app] {app_name} already open - focused")
+            if player:
+                player.write_log(f"[open_app] {app_name} already open")
+            return f"{app_name} is already open, sir — I've brought it to the front."
+    except Exception:
+        pass
+
     normalized = _normalize(app_name)
     print(f"[open_app] 🚀 Launching: {app_name} → {normalized} ({system})")
 
@@ -191,11 +211,13 @@ def open_app(
         success = launcher(normalized)
 
         if success:
+            _remember(app_name)
             return f"Opened {app_name} successfully, sir."
 
         if normalized != app_name:
             success = launcher(app_name)
             if success:
+                _remember(app_name)
                 return f"Opened {app_name} successfully, sir."
 
         return (

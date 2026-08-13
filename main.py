@@ -23,6 +23,7 @@ import json
 import queue
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -43,13 +44,13 @@ from google.genai import types
 from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
-    should_extract_memory, extract_memory
+    should_extract_memory, extract_memory, background_extraction_enabled
 )
 
 from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
 from actions.weather_report    import weather_action
-from actions.send_message      import send_message
+from actions.send_message      import send_message, open_chat
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
 from actions.screen_processor  import screen_process
@@ -123,11 +124,24 @@ def _rms(pcm: bytes) -> float:
 
 
 # ── Memory ────────────────────────────────────────────────────────────────────
-_last_memory_input = ""
+_last_memory_input   = ""
+_last_memory_attempt = 0.0
+
+# Background extraction is normally off (see background_extraction_enabled), but
+# even when it is switched on it must not fire twice a minute: two
+# generate_content calls per turn against a 20-a-day free tier empties the whole
+# budget during one conversation. A turn has to look like a personal disclosure
+# and wait out this interval before it earns an LLM round trip.
+_MEMORY_MIN_INTERVAL = 120.0
+_MEMORY_HINTS = (
+    "my ", "i'm ", "i am ", "i like", "i love", "i hate", "i live", "i work",
+    "my name", "favorite", "favourite", "birthday",
+    "benim", "adım", "seviyorum", "yaşıyorum", "çalışıyorum",
+)
 
 
 def _update_memory_async(user_text: str, jarvis_text: str) -> None:
-    global _last_memory_input
+    global _last_memory_input, _last_memory_attempt
 
     user_text   = (user_text   or "").strip()
     jarvis_text = (jarvis_text or "").strip()
@@ -135,6 +149,18 @@ def _update_memory_async(user_text: str, jarvis_text: str) -> None:
     if len(user_text) < 5 or user_text == _last_memory_input:
         return
     _last_memory_input = user_text
+
+    if not background_extraction_enabled():
+        return
+
+    lowered = user_text.lower()
+    if not any(hint in lowered for hint in _MEMORY_HINTS):
+        return
+
+    now = time.monotonic()
+    if now - _last_memory_attempt < _MEMORY_MIN_INTERVAL:
+        return
+    _last_memory_attempt = now
 
     try:
         api_key = _get_api_key()
@@ -145,7 +171,7 @@ def _update_memory_async(user_text: str, jarvis_text: str) -> None:
             update_memory(data)
             print(f"[Memory] saved {list(data.keys())}")
     except Exception as e:
-        if "429" not in str(e):
+        if "429" not in str(e) and "RESOURCE_EXHAUSTED" not in str(e):
             print(f"[Memory] {e}")
 
 
@@ -277,14 +303,19 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls the web browser. Use for: opening websites, searching the web, "
-            "clicking elements, filling forms, scrolling, any web-based task."
+            "Controls a single, persistent browser window that stays open across "
+            "separate orders. Use it to open a browser, open websites, search the "
+            "web, click, type, fill forms, scroll, read a page, or close the "
+            "browser. Because the window persists, 'open Brave' then later 'search "
+            "in it' then 'open YouTube' all act on the SAME window — do NOT use "
+            "open_app to open a browser you will then control here."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | press | close"},
-                "url":         {"type": "STRING", "description": "URL for go_to action"},
+                "action":      {"type": "STRING", "description": "open | go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | press | close"},
+                "browser":     {"type": "STRING", "description": "Which browser to use when opening: brave | chrome | edge | firefox | opera | vivaldi. Set it ONLY when the user names one; otherwise omit and the already-open browser (or the system default) is used. Never assume Chrome."},
+                "url":         {"type": "STRING", "description": "URL for open/go_to"},
                 "query":       {"type": "STRING", "description": "Search query for search action"},
                 "selector":    {"type": "STRING", "description": "CSS selector for click/type"},
                 "text":        {"type": "STRING", "description": "Text to click or type"},
@@ -395,21 +426,27 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+        "description": (
+            "Direct computer control: type, click, hotkeys, scroll, move mouse, "
+            "screenshots. To click something by name — a chat, a button, a menu "
+            "item, a link — use action 'smart_click' with a plain-language "
+            "'description'; it locates the real control and clicks it, no "
+            "coordinates needed."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
+                "action":      {"type": "STRING", "description": "smart_click | type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | random_data | user_data"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
-                "x":           {"type": "INTEGER", "description": "X coordinate"},
-                "y":           {"type": "INTEGER", "description": "Y coordinate"},
+                "x":           {"type": "INTEGER", "description": "X coordinate (omit for smart_click)"},
+                "y":           {"type": "INTEGER", "description": "Y coordinate (omit for smart_click)"},
                 "keys":        {"type": "STRING", "description": "Key combination e.g. 'ctrl+c'"},
                 "key":         {"type": "STRING", "description": "Single key e.g. 'enter'"},
                 "direction":   {"type": "STRING", "description": "up | down | left | right"},
                 "amount":      {"type": "INTEGER", "description": "Scroll amount (default: 3)"},
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
                 "title":       {"type": "STRING",  "description": "Window title for focus_window"},
-                "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click"},
+                "description": {"type": "STRING",  "description": "What to click, in plain words, for smart_click (e.g. 'the chat with Sara', 'the Send button')"},
                 "type":        {"type": "STRING",  "description": "Data type for random_data"},
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
@@ -495,6 +532,35 @@ TOOL_DECLARATIONS = [
             },
             "required": ["goal"]
         }
+    },
+    {
+        "name": "open_chat",
+        "description": (
+            "Opens a conversation with a person in a messaging app WITHOUT sending "
+            "anything — use it whenever the user says to open, click, or go to "
+            "someone's chat. It handles finding the chat itself: it clicks the chat "
+            "if visible and otherwise searches for it, so it works for any contact, "
+            "in any language. Pass the name exactly as the user said it."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "contact":  {"type": "STRING", "description": "The person or chat to open"},
+                "platform": {"type": "STRING", "description": "whatsapp (default) | telegram | app name"},
+            },
+            "required": ["contact"]
+        }
+    },
+    {
+        "name": "where_am_i",
+        "description": (
+            "Reports which applications and windows are open on the desktop right "
+            "now. Call it silently before opening or acting on an app when you are "
+            "not certain it is already open, so you continue in the existing window "
+            "instead of launching a second copy. Also answers the user directly "
+            "when he asks what is open."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
         "name": "save_memory",
@@ -654,6 +720,19 @@ class JarvisLive:
                 id=fc.id, name=name, response={"result": "ok", "silent": True}
             )
 
+        # where_am_i reads the live window list — instant, read-only.
+        if name == "where_am_i":
+            try:
+                from core import desktop_state
+                wins = desktop_state.open_windows()
+            except Exception:
+                wins = []
+            result = ("Open now: " + "; ".join(wins) + ".") if wins \
+                else "I can't read the open windows just now, sir."
+            return types.FunctionResponse(
+                id=fc.id, name=name, response={"result": result}
+            )
+
         self._busy_tools += 1
         if not self._is_speaking:
             self.ui.set_state("THINKING")
@@ -675,6 +754,9 @@ class JarvisLive:
                 result = await call(file_controller, player=self.ui)
             elif name == "send_message":
                 result = await call(send_message, response=None, player=self.ui,
+                                    session_memory=None)
+            elif name == "open_chat":
+                result = await call(open_chat, response=None, player=self.ui,
                                     session_memory=None)
             elif name == "reminder":
                 result = await call(reminder, response=None, player=self.ui)

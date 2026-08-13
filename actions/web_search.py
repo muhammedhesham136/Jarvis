@@ -23,21 +23,42 @@ def _get_api_key() -> str:
 
 def _gemini_search(query: str) -> str:
     from google import genai
-    client = genai.Client(api_key=_get_api_key())
+    from core import genai_compat as gc
+
     cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-    model_name = cfg.get("model_name", "gemini-2.5-flash")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=query,
-        config={"tools": [{"google_search": {}}]}
-    )
-    text = ""
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "text") and part.text:
-            text += part.text
-    if not text.strip():
-        raise ValueError("Empty response")
-    return text.strip()
+    keys = gc._keys() or [_get_api_key()]
+    # Grounded search needs a model that supports the google_search tool — the
+    # Gemma models do not, so keep to the gemini-* line while still rotating.
+    models = [m for m in gc._models(cfg.get("model_name", "gemini-3.5-flash"))
+              if m.startswith("gemini")]
+
+    last_err = None
+    for model in models:
+        for key in keys:
+            try:
+                client = genai.Client(api_key=key)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=query,
+                    config={"tools": [{"google_search": {}}]},
+                )
+                text = "".join(
+                    part.text for part in response.candidates[0].content.parts
+                    if getattr(part, "text", None)
+                )
+                if not text.strip():
+                    raise ValueError("Empty response")
+                if model != models[0]:
+                    print(f"[WebSearch] rotated to {model}")
+                return text.strip()
+            except Exception as e:                           # noqa: BLE001
+                last_err = e
+                s = str(e)
+                if any(t in s for t in ("429", "RESOURCE_EXHAUSTED", "quota",
+                                        "404", "NOT_FOUND")):
+                    continue                                 # rotate key / model
+                raise
+    raise last_err or RuntimeError("Search exhausted all Gemini options.")
 
 
 

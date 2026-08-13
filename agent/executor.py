@@ -64,7 +64,7 @@ def _detect_language(text: str) -> str:
     genai.configure(api_key=_get_api_key())
     import json
     cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-    model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+    model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
     try:
         response = model.generate_content(
             f"What language is this text written in? "
@@ -82,7 +82,7 @@ def _translate_to_goal_language(content: str, goal: str) -> str:
     try:
         from core import genai_compat as genai
         genai.configure(api_key=_get_api_key())
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-3.5-flash")
 
         target_lang = _detect_language(goal)
         print(f"[Executor] 🌐 Translating to: {target_lang}")
@@ -324,7 +324,7 @@ class AgentExecutor:
             import json
             cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
             genai.configure(api_key=_get_api_key())
-            model     = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+            model     = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
             steps_str = "\n".join(f"- {s.get('description', '')}" for s in completed_steps)
             prompt    = (
                 f'User goal: "{goal}"\n'

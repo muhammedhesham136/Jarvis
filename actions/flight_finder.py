@@ -75,7 +75,7 @@ def _parse_date(raw: str) -> str:
         genai.configure(api_key=_get_api_key())
         import json
         cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-        model    = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+        model    = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
         today_str = today.strftime("%Y-%m-%d")
         response = model.generate_content(
             f"Today is {today_str}. Convert this date to YYYY-MM-DD format: '{raw}'. "
@@ -187,7 +187,7 @@ def _parse_flights_with_gemini(
 
     genai.configure(api_key=_get_api_key())
     model = genai.GenerativeModel(
-        "gemini-2.5-flash"
+        "gemini-3.5-flash"
     )
 
     truncated = raw_text[:12000]

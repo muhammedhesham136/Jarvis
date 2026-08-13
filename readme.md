@@ -21,8 +21,11 @@ log. What it is doing is written in colour and motion:
 ```bash
 pip install -r requirements.txt
 playwright install
-python main.py
 ```
+
+Then start it with **`run.bat`** — it launches the interpreter in `.venv`, where
+the WebGL packages live. Starting `main.py` with a different Python still runs,
+but silently falls back to the flat renderer without the 3D interface.
 
 Paste your [Gemini API key](https://aistudio.google.com/apikey) on first launch.
 
@@ -39,9 +42,21 @@ Just talk. It is always listening unless muted.
 |---|---|
 | *start typing* | a command bar fades in — type an order instead of speaking |
 | `Enter` | send |
-| `Esc` | dismiss the bar |
+| `Esc` | dismiss the bar, or drop to the tray if it is already closed |
 | `F4` | mute / unmute the microphone |
-| `Ctrl+Q` | shut down |
+| `Ctrl+Q` | shut down completely |
+
+### Running in the background
+
+Press `Esc` (or close the window) and JARVIS slips into the system tray, still
+listening while you use the machine. The tray icon — cyan when live, red when
+muted — right-clicks to a menu:
+
+| | |
+|---|---|
+| **Show JARVIS** | bring the window back (or double-click the icon) |
+| **Microphone muted** | mute / unmute without opening the window |
+| **Quit JARVIS** | shut down completely |
 
 ---
 

@@ -189,7 +189,7 @@ def _model():
     from core import genai_compat as genai
     cfg = _cfg()
     genai.configure(api_key=cfg.get("gemini_api_key", ""))
-    return genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+    return genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
 
 def _strip_fences(text: str) -> str:

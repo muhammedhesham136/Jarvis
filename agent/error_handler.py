@@ -95,7 +95,7 @@ def analyze_error(
         cfg = json.loads(API_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         cfg = {}
-    model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+    model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
     # The compat shim takes no system_instruction, so it leads the prompt.
     prompt = f"""{ERROR_ANALYST_PROMPT}
@@ -155,7 +155,7 @@ def generate_fix(step: dict, error: str, fix_suggestion: str) -> dict:
     from core import genai_compat as genai
 
     genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash")
 
     prompt = f"""A task step failed. Generate a replacement step.
 

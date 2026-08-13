@@ -1,16 +1,13 @@
 import json
+import os
 import re
 import sys
 import time
 import subprocess
 import platform
 import shutil
+import webbrowser
 from pathlib import Path
-
-import pyautogui
-import numpy as np
-import cv2
-from PIL import ImageGrab
 
 try:
     import requests
@@ -49,86 +46,92 @@ def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
-def _get_default_browser_name() -> str | None:
-    # Forced override to target Brave executable
-    return "brave"
+def _get_brave_executable() -> str | None:
+    """Brave is not on PATH, so shutil.which alone never finds it."""
+    if platform.system() != "Windows":
+        return shutil.which("brave-browser") or shutil.which("brave")
 
-
-def _get_default_browser_display_name() -> str:
-    # Forced override to type Brave in Windows Search if direct execution fails
-    return "Brave"
-
-
-def open_browser():
-    """
-    Forces the browser launcher system to seek out and launch Brave Browser.
-    """
-    browser_exe = _get_default_browser_name()
-
-    if browser_exe:
-        exe_path = shutil.which(browser_exe) or shutil.which(browser_exe + ".exe")
-        if exe_path:
-            try:
-                subprocess.Popen([exe_path])
-                time.sleep(2.5)
-                print(f"[YouTube] ✅ Opened browser via exe: {exe_path}")
-                return
-            except Exception as e:
-                print(f"[YouTube] ⚠️ Direct exe failed: {e}")
-
-    display_name = _get_default_browser_display_name()
-    print(f"[YouTube] 🔍 Opening via Windows Search: '{display_name}'")
-    pyautogui.press("win")
-    time.sleep(0.5)
-    pyautogui.write(display_name, interval=0.04)
-    time.sleep(0.7)
-    pyautogui.press("enter")
-    time.sleep(2.5)
-
-def find_video_thumbnails() -> list[tuple[int, int]]:
     try:
-        screenshot = ImageGrab.grab()
-        img        = np.array(screenshot)
-        screen_h, screen_w = img.shape[:2]
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\brave.exe"
+        for hive in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
+            try:
+                key = winreg.OpenKey(hive, key_path)
+                val = winreg.QueryValue(key, None)
+                winreg.CloseKey(key)
+                exe = val.strip().strip('"')
+                if exe and Path(exe).exists():
+                    return exe
+            except Exception:
+                continue
+    except Exception:
+        pass
 
-        roi_top    = int(screen_h * 0.10)
-        roi_bottom = int(screen_h * 0.75)
-        roi_left   = int(screen_w * 0.20)
-        roi_right  = int(screen_w * 0.80)
-        roi        = img[roi_top:roi_bottom, roi_left:roi_right]
+    for root in [os.environ.get("PROGRAMFILES"),
+                 os.environ.get("PROGRAMFILES(X86)"),
+                 os.environ.get("LOCALAPPDATA")]:
+        if not root:
+            continue
+        candidate = Path(root) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"
+        if candidate.exists():
+            return str(candidate)
 
-        gray   = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
-        edges  = cv2.Canny(gray, 30, 100)
-        kernel = np.ones((3, 3), np.uint8)
-        edges  = cv2.dilate(edges, kernel, iterations=2)
+    return shutil.which("brave") or shutil.which("brave.exe")
 
-        contours, _ = cv2.findContours(
-            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+
+def open_url(url: str) -> bool:
+    """
+    Opens the url in a single window and reports whether the launch worked.
+    Brave is tried first because the OS default handler is not necessarily Brave.
+    """
+    exe_path = _get_brave_executable()
+    if exe_path:
+        try:
+            subprocess.Popen([exe_path, url])
+            print(f"[YouTube] ✅ Opened via exe: {exe_path}")
+            return True
+        except Exception as e:
+            print(f"[YouTube] ⚠️ Direct exe failed: {e}")
+
+    try:
+        if webbrowser.open(url):
+            print("[YouTube] ✅ Opened via default browser handler")
+            return True
+    except Exception as e:
+        print(f"[YouTube] ⚠️ Default browser launch failed: {e}")
+
+    return False
+
+
+def _resolve_top_video(query: str) -> tuple[str | None, str | None]:
+    """Resolves the first search hit server-side so playback needs no mouse automation."""
+    if not (_REQUESTS_OK and query):
+        return None, None
+
+    try:
+        resp = requests.get(
+            f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}",
+            headers=HEADERS, timeout=10
         )
+        resp.raise_for_status()
 
-        candidates = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            area  = w * h
-            ratio = w / h if h > 0 else 0
-            if area < 15000:
-                continue
-            if not (1.4 < ratio < 2.2):
-                continue
-            center_x = x + w // 2 + roi_left
-            center_y = y + h // 2 + roi_top
-            candidates.append((center_x, center_y, area))
+        vid = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', resp.text)
+        if not vid:
+            return None, None
 
-        filtered = []
-        for cx, cy, area in sorted(candidates, key=lambda c: c[1]):
-            if not any(abs(cx - fx) < 80 and abs(cy - fy) < 80 for fx, fy in filtered):
-                filtered.append((cx, cy))
+        title = re.search(
+            r'"title":\{"runs":\[\{"text":"((?:[^"\\]|\\.)*)"',
+            resp.text[vid.start():]
+        )
+        if not title:
+            return vid.group(1), None
 
-        return filtered
+        return vid.group(1), json.loads(f'"{title.group(1)}"')
 
     except Exception as e:
-        print(f"[YouTube] ⚠️ Thumbnail detection failed: {e}")
-        return []
+        print(f"[YouTube] ⚠️ Search resolution failed: {e}")
+        return None, None
+
 
 def _extract_video_id(url: str) -> str | None:
     patterns = [r"(?:v=|\/v\/|youtu\.be\/|\/embed\/|\/shorts\/)([A-Za-z0-9_-]{11})"]
@@ -202,7 +205,7 @@ def _summarize_with_gemini(transcript: str, video_url: str) -> str:
 
     genai.configure(api_key=_get_api_key())
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
+        model_name="gemini-3.5-flash",
         system_instruction=(
             "You are JARVIS, Tony Stark's AI assistant. "
             "Summarize YouTube video transcripts clearly and concisely. "
