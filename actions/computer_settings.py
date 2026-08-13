@@ -28,6 +28,13 @@ try:
 except ImportError:
     _PYPERCLIP = False
 
+try:
+    import pygetwindow
+    import psutil
+    _WINDOW_API = True
+except ImportError:
+    _WINDOW_API = False
+
 _OS = platform.system() 
 
 def get_base_dir() -> Path:
@@ -122,6 +129,115 @@ def close_window():
         pyautogui.hotkey("command", "w")
     else:
         pyautogui.hotkey("ctrl", "w")
+
+# "browser" hiçbir pencere başlığında geçmez; bilinen tarayıcı adlarına açılır.
+_TARGET_SYNONYMS = {
+    "browser":  ("brave", "chrome", "edge", "firefox", "opera", "safari"),
+    "tarayici": ("brave", "chrome", "edge", "firefox", "opera", "safari"),
+    "tarayıcı": ("brave", "chrome", "edge", "firefox", "opera", "safari"),
+}
+
+_TARGET_FILLER = {
+    "close", "quit", "exit", "kill", "terminate", "shut", "down", "kapat", "cerrar",
+    "the", "a", "an", "my", "this", "that", "it", "app", "apps", "application",
+    "program", "window", "windows", "uygulama", "uygulamayi", "uygulamayı",
+    "please", "sir", "again", "now", "for", "me",
+}
+
+def _close_target_name(value, description: str) -> str:
+    """Kapatılacak hedefin adını value/description'dan çıkarır; yoksa ''."""
+    raw   = str(value or "").strip() or (description or "")
+    words = [w.strip(".,!?'\"") for w in raw.lower().replace("_", " ").split()]
+    return " ".join(w for w in words if w and w not in _TARGET_FILLER).strip()
+
+def _matching_windows(name: str) -> list:
+    hits = []
+    for w in pygetwindow.getAllWindows():
+        try:
+            if w.title.strip() and w.visible and name in w.title.lower():
+                hits.append(w)
+        except Exception:
+            continue
+    return hits
+
+def _matching_procs(name: str) -> list:
+    hits = []
+    for p in psutil.process_iter(["name"]):
+        try:
+            if name in (p.info["name"] or "").lower():
+                hits.append(p)
+        except psutil.Error:
+            continue
+    return hits
+
+def _kill_procs(name: str) -> int:
+    self_pid = psutil.Process().pid
+    killed   = 0
+    for p in _matching_procs(name):
+        if p.pid == self_pid:
+            continue
+        try:
+            p.terminate()
+            killed += 1
+        except psutil.Error:
+            continue
+    return killed
+
+def close_target(target: str, force: bool = False) -> str:
+    """
+    Adı verilen uygulamayı kapatır ve pencerelerin gerçekten kaybolduğunu doğrular.
+    Alt+F4 sessizce başarısız olabildiği için sonuç öncesi/sonrası sayımdan üretilir.
+    """
+    for name in _TARGET_SYNONYMS.get(target, (target,)):
+        windows = _matching_windows(name)
+        procs   = _matching_procs(name)
+        if not windows and not procs:
+            continue
+
+        if not windows:
+            if force and _kill_procs(name):
+                return f"Force-closed {name}."
+            return f"There is no open {name} window, sir."
+
+        label = windows[0].title.strip()
+        for w in windows:
+            try:
+                w.activate()
+                time.sleep(0.15)
+            except Exception:
+                pass  # activate izin hatası verebilir; close yine de WM_CLOSE gönderir
+            try:
+                w.close()
+            except Exception:
+                pass
+        time.sleep(1.2)
+
+        if not _matching_windows(name):
+            return f"Closed {label}."
+        if force:
+            _kill_procs(name)
+            time.sleep(1.0)
+            if not _matching_windows(name):
+                return f"Force-closed {label}."
+        left = len(_matching_windows(name))
+        return f"I could not close {label}, sir — {left} window(s) are still open."
+
+    return f"I could not find anything matching '{target}' to close, sir."
+
+def close_foreground() -> str:
+    """Hedef çıkarılamadığında öndeki pencereye Alt+F4 gönderir ve başlıktan doğrular."""
+    try:
+        active = pygetwindow.getActiveWindow()
+        title  = active.title.strip() if active else ""
+    except Exception:
+        title = ""
+    close_app()
+    if not title:
+        return "Sent the close command to the front window, sir, but I could not verify it closed."
+    time.sleep(1.2)
+    if any(w.title.strip() == title for w in _matching_windows(title.lower())):
+        return f"'{title}' is still open, sir — the close command did not take."
+    return f"Closed '{title}'."
 
 def full_screen():
     if _OS == "Darwin":
@@ -519,7 +635,7 @@ def _detect_action(description: str) -> dict:
     genai.configure(api_key=_get_api_key())
     import json
     cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-    model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+    model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + ", volume_set, type_text, write_on_screen, reload_n, press_key"
 

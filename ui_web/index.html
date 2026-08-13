@@ -24,6 +24,16 @@
   }
   #cmd::placeholder{color:rgba(120,200,225,.35)}
 
+  /* Controls hint: shown briefly on load, then fades out of the way. */
+  #hint{
+    position:fixed;left:0;right:0;bottom:26px;text-align:center;
+    color:rgba(120,200,225,.5);font:400 12px/1 Consolas,"Courier New",monospace;
+    letter-spacing:.06em;pointer-events:none;user-select:none;
+    transition:opacity 1s ease;opacity:1;z-index:5;
+  }
+  #hint b{color:rgba(150,220,255,.8);font-weight:600}
+  #hint.gone{opacity:0}
+
   #setup{
     position:fixed;inset:0;display:none;place-items:center;
     background:rgba(0,0,0,.86);backdrop-filter:blur(3px);cursor:auto;
@@ -54,6 +64,8 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
+
+<div id="hint"><b>type</b> to give an order &nbsp;·&nbsp; <b>F4</b> mute &nbsp;·&nbsp; <b>Esc</b> to tray &nbsp;·&nbsp; <b>Ctrl+Q</b> quit</div>
 
 <div id="bar"><input id="cmd" autocomplete="off" spellcheck="false" placeholder="speak, or type your order"></div>
 
@@ -389,8 +401,17 @@ const cmd   = document.getElementById("cmd");
 const setup = document.getElementById("setup");
 const key   = document.getElementById("key");
 const go    = document.getElementById("go");
+const hint  = document.getElementById("hint");
+
+// The hint lingers long enough to read, then dissolves; any order dismisses it.
+let hintTimer = setTimeout(() => hint && hint.classList.add("gone"), 7000);
+function dismissHint() {
+  clearTimeout(hintTimer);
+  if (hint) hint.classList.add("gone");
+}
 
 function showBar(seed) {
+  dismissHint();
   bar.classList.add("on");
   document.body.style.cursor = "auto";
   cmd.value = seed || "";
@@ -419,7 +440,12 @@ addEventListener("keydown", (e) => {
   if (setup.classList.contains("on")) return;
 
   if (e.key === "F4") { muted = !muted; send({ type: "mute", value: muted }); return; }
-  if (e.key === "Escape") { hideBar(); return; }
+  if (e.key === "Escape") {
+    // Close the command bar if it is open, otherwise drop to the tray.
+    if (bar.classList.contains("on")) hideBar();
+    else send({ type: "hide" });
+    return;
+  }
   if (e.ctrlKey && e.key.toLowerCase() === "q") { send({ type: "quit" }); return; }
 
   if (!bar.classList.contains("on") && e.key.length === 1 && !e.ctrlKey && !e.altKey) {

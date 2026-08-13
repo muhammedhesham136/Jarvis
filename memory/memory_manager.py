@@ -2,7 +2,7 @@
 memory_manager.py — JARVIS Hafıza Sistemi
 ============================================
 Düzeltmeler:
-  - _MEMORY_EVERY_N_TURNS: 3 → 1 (her turda kontrol)
+  - Arka plan çıkarımı varsayılan olarak KAPALI (günlük kota koruması)
   - Stage 1 YES/NO check daha geniş kriterlere sahip
   - Extraction prompt daha kapsamlı ve agresif
   - Projeleri, favori şeyleri, arkadaşları daha iyi yakalar
@@ -23,8 +23,41 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
+CONFIG_PATH      = BASE_DIR / "config" / "api_keys.json"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 400
+
+# The quota message repeats on every single turn once the daily budget is gone,
+# so it is announced once per process and then swallowed.
+_quota_notified = False
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def background_extraction_enabled() -> bool:
+    """
+    Off unless config/api_keys.json explicitly turns it on: every turn costs two
+    generate_content calls and the free tier allows 20 per DAY, which starved
+    do_anything, the planner and web_search within minutes. The save_memory tool
+    rides the live audio session instead and costs nothing.
+    """
+    return bool(_load_config().get("background_memory_extraction", False))
+
+
+def _report_llm_failure(stage: str, exc: Exception) -> None:
+    global _quota_notified
+    text = str(exc)
+    if "429" in text or "RESOURCE_EXHAUSTED" in text:
+        if not _quota_notified:
+            _quota_notified = True
+            print("[Memory] Daily free-tier quota reached - background memory paused for today.")
+        return
+    print(f"[Memory] ⚠️ {stage} failed: {exc}")
 
 
 def _empty_memory() -> dict:
@@ -119,12 +152,14 @@ def should_extract_memory(user_text: str, jarvis_text: str, api_key: str) -> boo
     Stage 1: Hızlı YES/NO kontrolü.
     Öncekinden daha geniş kriterler — favori şeyler, projeler, arkadaşlar da dahil.
     """
+    if not background_extraction_enabled():
+        return False
+
     try:
         from core import genai_compat as genai
-        import json
-        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
+        cfg = _load_config()
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+        model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
         # Her iki tarafı da gönder — Jarvis'in söyledikleri de bilgi içerebilir
         combined = f"User: {user_text[:300]}\nJarvis: {jarvis_text[:200]}"
@@ -141,7 +176,7 @@ def should_extract_memory(user_text: str, jarvis_text: str, api_key: str) -> boo
         )
         return "YES" in check.text.upper()
     except Exception as e:
-        print(f"[Memory] ⚠️ Stage1 check failed: {e}")
+        _report_llm_failure("Stage1 check", e)
         return False
 
 
@@ -149,12 +184,14 @@ def extract_memory(user_text: str, jarvis_text: str, api_key: str) -> dict:
     """
     Stage 2: Detaylı çıkarım. Her iki tarafı da analiz eder.
     """
+    if not background_extraction_enabled():
+        return {}
+
     try:
         from core import genai_compat as genai
-        import json
-        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
+        cfg = _load_config()
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+        model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
         combined = f"User: {user_text[:500]}\nJarvis: {jarvis_text[:300]}"
 
@@ -198,8 +235,7 @@ def extract_memory(user_text: str, jarvis_text: str, api_key: str) -> dict:
     except json.JSONDecodeError:
         return {}
     except Exception as e:
-        if "429" not in str(e):
-            print(f"[Memory] ⚠️ Extract failed: {e}")
+        _report_llm_failure("Extract", e)
         return {}
 
 

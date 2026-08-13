@@ -108,7 +108,7 @@ def _ask_gemini(task: str) -> str:
         genai.configure(api_key=_get_api_key())
         import json
         cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-        model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
+        model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
         prompt = (
             f"Convert this request to a single Windows CMD command.\n"

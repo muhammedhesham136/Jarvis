@@ -308,26 +308,38 @@ def _clear_field() -> str:
     return "Field cleared"
 
 
-def _smart_type(text: str, clear_first: bool = True) -> str:
+def _smart_type(text: str, clear_first: bool = True, description: str = "") -> str:
     """
-    Types text into the currently focused field.
-    Optionally clears the field first.
-    Uses clipboard for long text (faster, more reliable).
+    Type text into a field.
+
+    If a field is named it is focused first — otherwise the text lands wherever
+    focus happens to be, which is why a blind search never entered anything.
+    Any non-ASCII text (Arabic, emoji) goes through the clipboard, since
+    pyautogui.typewrite can only produce ASCII and silently drops the rest.
     """
     _ensure_pyautogui()
+
+    if description:
+        try:
+            ok, _ = _click_by_text(description)
+            if ok:
+                time.sleep(0.25)
+        except Exception:
+            pass
 
     if clear_first:
         _clear_field()
         time.sleep(0.1)
 
-    if len(text) > 20 and _PYPERCLIP:
+    non_ascii = any(ord(ch) > 127 for ch in text)
+    if _PYPERCLIP and (non_ascii or len(text) > 20):
         pyperclip.copy(text)
-        time.sleep(0.1)
+        time.sleep(0.12)
         pyautogui.hotkey("ctrl", "v")
-        return f"Smart-typed (clipboard): {text[:50]}"
-    else:
-        pyautogui.typewrite(text, interval=0.04)
-        return f"Smart-typed: {text[:50]}"
+        return f"Typed: {text[:50]}"
+
+    pyautogui.typewrite(text, interval=0.04)
+    return f"Typed: {text[:50]}"
 
 
 def _analyze_screen_for_element(description: str) -> tuple[int, int] | None:
@@ -339,15 +351,13 @@ def _analyze_screen_for_element(description: str) -> tuple[int, int] | None:
         from core import genai_compat as genai
         import io
 
-        cfg_path = API_CONFIG_PATH
-        with open(cfg_path, "r") as f:
-            api_key = json.load(f)["gemini_api_key"]
+        # A single read of the config — the module-level json is used throughout;
+        # a second `import json` here would shadow it and break the line above.
+        cfg = json.loads(Path(API_CONFIG_PATH).read_text(encoding="utf-8"))
+        api_key = cfg.get("gemini_api_key", "")
 
         genai.configure(api_key=api_key)
-        import json
-        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "api_keys.json").read_text())
-        model = genai.GenerativeModel(cfg.get("model_name", "gemini-2.5-flash"))
-
+        model = genai.GenerativeModel(cfg.get("model_name", "gemini-3.5-flash"))
 
         _ensure_pyautogui()
         w, h  = pyautogui.size()
@@ -357,10 +367,11 @@ def _analyze_screen_for_element(description: str) -> tuple[int, int] | None:
         buf.seek(0)
 
         prompt = (
-            f"This is a screenshot of a computer screen ({w}x{h} pixels). "
+            "This is a screenshot of a computer screen. "
             f"Find the element: '{description}'. "
-            f"Return ONLY: x,y (the center coordinates of the element). "
-            f"If not found, return: NOT_FOUND"
+            "Respond with ONLY two integers 'x,y' for the CENTRE of that element, "
+            "each on a 0-1000 scale (x from the left edge, y from the top edge). "
+            "If it is not visible, respond with exactly: NOT_FOUND"
         )
 
         response = model.generate_content([
@@ -375,12 +386,133 @@ def _analyze_screen_for_element(description: str) -> tuple[int, int] | None:
         import re
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            return int(match.group(1)), int(match.group(2))
+            # The model is asked for a point on a 0-1000 grid; scale to pixels.
+            nx, ny = int(match.group(1)), int(match.group(2))
+            if nx <= 1000 and ny <= 1000:
+                return int(nx / 1000 * w), int(ny / 1000 * h)
+            return nx, ny
 
     except Exception as e:
         print(f"[ComputerControl] ⚠️ Screen analysis failed: {e}")
 
     return None
+
+
+def _norm(s: str) -> str:
+    """Lower-case, collapse whitespace, drop the non-breaking spaces UIA emits."""
+    return " ".join((s or "").replace("\xa0", " ").lower().split())
+
+
+def _match_score(query: str, text: str) -> int:
+    """How well a control's visible text answers 'click on <query>'. 0 = no match."""
+    if not text:
+        return 0
+    if text == query:
+        return 100
+    if text.startswith(query) or query.startswith(text):
+        return 85
+    if query in text:
+        return 70
+    q_words = query.split()
+    if q_words and all(w in text for w in q_words):
+        return 50
+    return 0
+
+
+def _click_by_text(description: str, double: bool = False) -> tuple[bool, str | None]:
+    """
+    Click a control by its visible name via UI Automation.
+
+    This reads the real accessibility tree, so it lands on the actual control —
+    a chat, a button, a menu item — with no screenshot and no API call. Falls
+    back to the vision finder only when nothing here matches.
+    """
+    try:
+        import ctypes
+        from pywinauto import Desktop
+    except Exception:
+        return (False, None)
+
+    query = _norm(description)
+    if not query:
+        return (False, None)
+
+    def scan(root, budget=1200):
+        # budget caps how many controls we examine — a window with thousands of
+        # descendants and no match must not stall the assistant.
+        found = []
+        seen = 0
+        try:
+            for ctrl in root.descendants():
+                seen += 1
+                if seen > budget:
+                    break
+                try:
+                    text = _norm(ctrl.window_text())
+                except Exception:
+                    continue
+                score = _match_score(query, text)
+                if score <= 0:
+                    continue
+                try:
+                    if not (ctrl.is_visible() and ctrl.is_enabled()):
+                        continue
+                except Exception:
+                    pass
+                found.append((score, len(text), ctrl, text))
+                if len(found) > 60:
+                    break
+        except Exception:
+            pass
+        return found
+
+    candidates = []
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        candidates = scan(Desktop(backend="uia").window(handle=hwnd))
+    except Exception:
+        candidates = []
+
+    # Nothing in the focused window — widen to other titled top-level windows,
+    # newest first, but only a few and each on a tight budget.
+    if not candidates:
+        try:
+            checked = 0
+            for win in Desktop(backend="uia").windows(visible_only=True):
+                try:
+                    if not (win.window_text() or "").strip():
+                        continue
+                except Exception:
+                    continue
+                candidates = scan(win, budget=800)
+                checked += 1
+                if candidates or checked >= 6:
+                    break
+        except Exception:
+            pass
+
+    if not candidates:
+        return (False, None)
+
+    # Best score wins; among equals, the shortest label is the tightest match.
+    candidates.sort(key=lambda c: (-c[0], c[1]))
+    _, _, ctrl, text = candidates[0]
+
+    try:
+        ctrl.set_focus()
+    except Exception:
+        pass
+    try:
+        ctrl.double_click_input() if double else ctrl.click_input()
+        return (True, text)
+    except Exception:
+        try:
+            r = ctrl.rectangle()
+            _click(x=(r.left + r.right) // 2, y=(r.top + r.bottom) // 2,
+                   clicks=2 if double else 1)
+            return (True, text)
+        except Exception:
+            return (False, None)
 
 def computer_control(
     parameters:     dict,
@@ -432,9 +564,24 @@ def computer_control(
         elif action == "smart_type":
             text        = parameters.get("text", "")
             clear_first = parameters.get("clear_first", True)
-            return _smart_type(text, clear_first=clear_first)
+            description = parameters.get("description", "")
+            return _smart_type(text, clear_first=clear_first, description=description)
         
         elif action in ("click", "left_click"):
+            # "click on the Sara chat" — a description with no coordinates means
+            # find it by name and click it, rather than clicking where the mouse is.
+            desc = parameters.get("description") or parameters.get("text")
+            if desc and parameters.get("x") is None and parameters.get("y") is None \
+                    and not parameters.get("image"):
+                ok, label = _click_by_text(desc)
+                if ok:
+                    return f"Clicked '{label}', sir."
+                coords = _analyze_screen_for_element(desc)
+                if coords:
+                    time.sleep(0.2)
+                    _click(x=coords[0], y=coords[1])
+                    return f"Clicked {desc}, sir."
+                return f"I couldn't find '{desc}' on the screen, sir."
             return _click(
                 x=parameters.get("x"),
                 y=parameters.get("y"),
@@ -518,20 +665,27 @@ def computer_control(
             return _get_screen_size()
 
         elif action == "screen_find":
-            description = parameters.get("description", "")
+            description = parameters.get("description", "") or parameters.get("text", "")
             coords = _analyze_screen_for_element(description)
             if coords:
                 return f"{coords[0]},{coords[1]}"
             return "NOT_FOUND"
 
-        elif action == "screen_click":
-            description = parameters.get("description", "")
+        elif action in ("screen_click", "smart_click"):
+            description = parameters.get("description", "") or parameters.get("text", "")
+            if not description:
+                return "Tell me what to click, sir."
+            # UI Automation first — precise, instant, no API cost.
+            ok, label = _click_by_text(description)
+            if ok:
+                return f"Clicked '{label}', sir."
+            # Fall back to the vision finder.
             coords = _analyze_screen_for_element(description)
             if coords:
                 time.sleep(0.2)
                 _click(x=coords[0], y=coords[1])
-                return f"Found and clicked: {description} at {coords}"
-            return f"Could not find on screen: {description}"
+                return f"Clicked {description}, sir."
+            return f"I couldn't find '{description}' on the screen, sir."
 
         elif action == "random_data":
             data_type = parameters.get("type", "name")

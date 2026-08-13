@@ -3,10 +3,11 @@ google-genai
 google-generativeai
 pywebview
 websockets
+pystray
 pillow
 requests
 beautifulsoup4
-duckduckgo-search
+ddgs
 playwright
 pyautogui
 pyperclip

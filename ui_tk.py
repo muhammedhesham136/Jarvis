@@ -35,6 +35,8 @@ from pathlib import Path
 import tkinter as tk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
+from tray import Tray
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -114,8 +116,18 @@ class JarvisUI:
         if not self._api_key_ready:
             self._show_setup()
 
+        self._quitting = False
+        self._tray = Tray(
+            on_show=self._show_window,
+            on_quit=self._quit,
+            on_toggle_mute=self.toggle_mute,
+            is_muted=lambda: self.muted,
+        )
+
         self._tick()
-        self.root.protocol("WM_DELETE_WINDOW", lambda: os._exit(0))
+        # Closing the window drops to the tray and keeps listening, unless the
+        # tray is unavailable — then there is no way back, so exit outright.
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_window)
 
     # ── Canvas & pre-rendered art ─────────────────────────────────────────────
 
@@ -248,9 +260,16 @@ class JarvisUI:
         r.bind("<F4>", lambda e: self.toggle_mute())
         r.bind("<F11>", lambda e: r.attributes(
             "-fullscreen", not r.attributes("-fullscreen")))
-        r.bind("<Control-q>", lambda e: os._exit(0))
-        r.bind("<Escape>", lambda e: self._hide_entry())
+        r.bind("<Control-q>", lambda e: self._quit())
+        r.bind("<Escape>", self._on_escape)
         r.bind("<Key>", self._on_key)
+
+    def _on_escape(self, _event=None):
+        # Close the command bar if open, otherwise drop to the tray.
+        if self._entry_visible:
+            self._hide_entry()
+        else:
+            self._hide_window()
 
     def _on_key(self, event):
         if self._entry_visible or not self._api_key_ready:
@@ -287,6 +306,38 @@ class JarvisUI:
         else:
             self._state = "LISTENING"
             self.write_log("SYS: Microphone live.")
+        self._tray.refresh()
+
+    # ── Tray / background ─────────────────────────────────────────────────────
+
+    def _show_window(self):
+        # Called from the tray thread; Tk work must return to the Tk thread.
+        self.root.after(0, self._do_show)
+
+    def _do_show(self):
+        try:
+            self.root.deiconify()
+            self.root.attributes("-fullscreen", True)
+            self.root.lift()
+        except Exception:
+            pass
+
+    def _hide_window(self):
+        """Drop to the tray and keep listening. Full exit if no tray exists."""
+        if not self._tray.available:
+            self._quit()
+            return
+        self.root.after(0, self.root.withdraw)
+        if not getattr(self, "_tray_notified", False):
+            self._tray.notify(
+                "Still listening. Right-click the tray icon to show or quit.")
+            self._tray_notified = True
+        self.write_log("SYS: Minimised to tray — still listening.")
+
+    def _quit(self):
+        self._quitting = True
+        self._tray.stop()
+        os._exit(0)
 
     def start_speaking(self):
         self.set_state("SPEAKING")
@@ -300,7 +351,8 @@ class JarvisUI:
             time.sleep(0.05)
 
     def start(self):
-        """Blocks until the window closes. Must run on the main thread."""
+        """Blocks until a real quit. Must run on the main thread."""
+        self._tray.start()
         self.root.mainloop()
 
     # ── Animation ─────────────────────────────────────────────────────────────
@@ -465,7 +517,7 @@ class JarvisUI:
             except Exception:
                 data = {}
         data["gemini_api_key"] = key
-        data.setdefault("model_name", "gemini-2.5-flash")
+        data.setdefault("model_name", "gemini-3.5-flash")
         API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
 
         self._setup.destroy()
