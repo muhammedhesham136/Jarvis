@@ -4,6 +4,9 @@ config/api_keys.json
 # Personal long-term memory
 memory/long_term.json
 
+# Email watcher's last-seen UID
+config/.email_state.json
+
 # Environments and caches
 .venv/
 venv/

@@ -65,6 +65,7 @@ from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.universal         import do_anything, run_command
+from actions.email_checker     import check_email, start_email_watcher
 
 
 def get_base_dir() -> Path:
@@ -563,6 +564,22 @@ TOOL_DECLARATIONS = [
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
     {
+        "name": "check_email",
+        "description": (
+            "Reads the user's inbox over IMAP and reports unread or recent emails. "
+            "Use whenever the user asks to check email, read mail, or see if anything "
+            "new has arrived."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "unread_only": {"type": "BOOLEAN", "description": "Only unread mail (default true)"},
+                "count":       {"type": "INTEGER", "description": "How many to summarise, default 5"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save an important personal fact about the user to long-term memory. "
@@ -611,6 +628,7 @@ class JarvisLive:
 
         self.ui.on_text_command = self._on_text_command
         threading.Thread(target=self._play_worker, daemon=True).start()
+        start_email_watcher(self.speak, write_log=self.ui.write_log)
 
     # ── Speech state ─────────────────────────────────────────────────────────
 
@@ -782,6 +800,8 @@ class JarvisLive:
                 result = await call(flight_finder, player=self.ui)
             elif name == "run_command":
                 result = await call(run_command, player=self.ui)
+            elif name == "check_email":
+                result = await call(check_email, player=self.ui)
             elif name == "do_anything":
                 result = await call(do_anything, player=self.ui, speak=self.speak)
 
