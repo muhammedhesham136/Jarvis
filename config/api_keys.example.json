@@ -1,5 +1,7 @@
 {
     "gemini_api_key": "PASTE_YOUR_GEMINI_API_KEY_HERE",
     "model_name": "gemini-2.5-flash",
-    "voice_name": "Charon"
+    "voice_name": "Charon",
+    "email_address": "you@gmail.com",
+    "email_password": "APP_PASSWORD_NOT_YOUR_NORMAL_ONE"
 }

@@ -52,6 +52,8 @@ from actions.open_app          import open_app
 from actions.weather_report    import weather_action
 from actions.send_message      import send_message, open_chat
 from actions.reminder          import reminder
+from actions.email_assistant   import email_assistant
+from core.proactive            import Proactive
 from actions.computer_settings import computer_settings
 from actions.screen_processor  import screen_process
 from actions.youtube_video     import youtube_video
@@ -235,15 +237,49 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "reminder",
-        "description": "Sets a timed reminder using Windows Task Scheduler.",
+        "description": (
+            "The user's reminders and to-do list. Use it to set reminders, add "
+            "things they must not forget, list what is open, mark items done, "
+            "delete or snooze them. Reminders are spoken aloud when due and "
+            "repeated until acknowledged. For 'in 20 minutes' use in_minutes."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "date":    {"type": "STRING", "description": "Date in YYYY-MM-DD format"},
-                "time":    {"type": "STRING", "description": "Time in HH:MM format (24h)"},
-                "message": {"type": "STRING", "description": "Reminder message text"}
+                "action":     {"type": "STRING", "description": "add (default) | add_task (to-do, no time) | list | complete | delete | snooze"},
+                "message":    {"type": "STRING", "description": "What to be reminded of, or the to-do text"},
+                "date":       {"type": "STRING", "description": "Date in YYYY-MM-DD format"},
+                "time":       {"type": "STRING", "description": "Time in HH:MM format (24h)"},
+                "in_minutes": {"type": "NUMBER", "description": "Relative time instead of date/time"},
+                "repeat":     {"type": "STRING", "description": "daily | weekdays | weekly | monthly"},
+                "query":      {"type": "STRING", "description": "Id or words identifying an existing item (complete/delete/snooze)"},
+                "minutes":    {"type": "NUMBER", "description": "Snooze length in minutes"}
             },
-            "required": ["date", "time", "message"]
+            "required": []
+        }
+    },
+    {
+        "name": "email",
+        "description": (
+            "Read and answer the user's email. 'check' lists unread mail; 'read' "
+            "opens one by uid; 'search' finds mail by sender or subject; 'reply' "
+            "answers a message; 'send' writes a new one. NEVER send without "
+            "approval: call reply/send first WITHOUT confirm to get a draft, read "
+            "it to the user, and only after a clear yes call again with confirm=true."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":  {"type": "STRING", "description": "check (default) | read | search | reply | send"},
+                "uid":     {"type": "STRING", "description": "Message id from an earlier check/search (read, reply)"},
+                "query":   {"type": "STRING", "description": "Sender name/address or subject words (search)"},
+                "body":    {"type": "STRING", "description": "Text of the reply or new email"},
+                "to":      {"type": "STRING", "description": "Recipient email address (send)"},
+                "subject": {"type": "STRING", "description": "Subject line (send)"},
+                "limit":   {"type": "NUMBER", "description": "How many messages to list"},
+                "confirm": {"type": "BOOLEAN", "description": "true ONLY after the user approved the draft"}
+            },
+            "required": []
         }
     },
     {
@@ -612,6 +648,13 @@ class JarvisLive:
         self.ui.on_text_command = self._on_text_command
         threading.Thread(target=self._play_worker, daemon=True).start()
 
+        # Speaks reminders, new mail and the welcome-back briefing on its own.
+        self.proactive = Proactive(
+            speak=self.speak,
+            is_idle=lambda: not self._is_speaking and not self._busy_tools,
+            is_online=lambda: self.session is not None,
+        )
+
     # ── Speech state ─────────────────────────────────────────────────────────
 
     def set_speaking(self, value: bool):
@@ -760,6 +803,8 @@ class JarvisLive:
                                     session_memory=None)
             elif name == "reminder":
                 result = await call(reminder, response=None, player=self.ui)
+            elif name == "email":
+                result = await call(email_assistant, response=None, player=self.ui)
             elif name == "youtube_video":
                 result = await call(youtube_video, response=None, player=self.ui)
             elif name == "computer_settings":
