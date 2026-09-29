@@ -1,156 +1,82 @@
 # actions/reminder.py
+# Reminders and to-dos, backed by core.reminder_store. The background watcher
+# in core.proactive is what actually speaks them when they fall due.
 
-import subprocess
-import os
-import sys
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from core import reminder_store as store
 
 
-def reminder(
-    parameters: dict,
-    response: str | None = None,
-    player=None,
-    session_memory=None
-) -> str:
+def _parse_due(p: dict) -> datetime | None:
+    minutes = p.get("in_minutes")
+    if minutes not in (None, ""):
+        return datetime.now().replace(microsecond=0) + timedelta(minutes=int(float(minutes)))
+
+    date_str, time_str = p.get("date"), p.get("time")
+    if not date_str and not time_str:
+        return None
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    if not time_str:
+        time_str = "09:00"
+    return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+
+
+def reminder(parameters: dict, response=None, player=None, session_memory=None) -> str:
     """
-    Sets a timed reminder using Windows Task Scheduler.
-
     parameters:
-        - date    (str) YYYY-MM-DD
-        - time    (str) HH:MM
-        - message (str)
-
-    Returns a result string — Live API voices it automatically.
-    No edge_speak needed.
+        action    add (default) | add_task | list | complete | delete | snooze
+        message   what to be reminded of / the to-do text
+        date      YYYY-MM-DD           time      HH:MM (24h)
+        in_minutes  relative alternative to date/time
+        repeat    daily | weekdays | weekly | monthly
+        query     id or words identifying an existing item
+        minutes   snooze length
     """
-
-    date_str = parameters.get("date")
-    time_str = parameters.get("time")
-    message  = parameters.get("message", "Reminder")
-
-    if not date_str or not time_str:
-        return "I need both a date and a time to set a reminder."
+    p      = parameters or {}
+    action = str(p.get("action") or "add").lower()
 
     try:
-        target_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        if action in ("add", "add_task"):
+            message = (p.get("message") or "").strip()
+            if not message:
+                return "What should I remind you about, sir?"
 
-        if target_dt <= datetime.now():
-            return "That time is already in the past."
+            due = None if action == "add_task" else _parse_due(p)
+            if due and due <= datetime.now():
+                return "That time is already in the past, sir."
 
-        task_name    = f"MARKReminder_{target_dt.strftime('%Y%m%d_%H%M')}"
-        safe_message = message.replace('"', '').replace("'", "").strip()[:200]
+            item = store.add(message, due, p.get("repeat"))
+            if player:
+                player.write_log(f"[reminder] {store.describe(item)}")
+            if not due:
+                return f"Added to your to-do list: {message}."
+            return f"Reminder set: {store.describe(item)}."
 
-        python_exe = sys.executable
-        if python_exe.lower().endswith("python.exe"):
-            pythonw = python_exe.replace("python.exe", "pythonw.exe")
-            if os.path.exists(pythonw):
-                python_exe = pythonw
+        if action == "list":
+            items = store.active()
+            if not items:
+                return "You have no open reminders or to-dos, sir."
+            return "Open items:\n" + "\n".join(f"- {store.describe(i)}" for i in items)
 
-        temp_dir      = os.environ.get("TEMP", "C:\\Temp")
-        notify_script = os.path.join(temp_dir, f"{task_name}.pyw")
-        project_root  = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..")
-        )
+        target = store.find(p.get("query") or p.get("message") or "")
+        if action in ("complete", "delete", "snooze") and not target:
+            return "I couldn't find a matching reminder, sir."
 
-        script_code = f'''import sys, os, time
-sys.path.insert(0, r"{project_root}")
+        if action == "complete":
+            store.complete(target["id"])
+            return f"Marked done: {target['message']}."
+        if action == "delete":
+            store.delete(target["id"])
+            return f"Deleted: {target['message']}."
+        if action == "snooze":
+            minutes = int(float(p.get("minutes") or 10))
+            store.snooze(target["id"], minutes)
+            return f"I'll remind you again in {minutes} minutes: {target['message']}."
 
-try:
-    import winsound
-    for freq in [800, 1000, 1200]:
-        winsound.Beep(freq, 200)
-        time.sleep(0.1)
-except Exception:
-    pass
-
-try:
-    from win10toast import ToastNotifier
-    ToastNotifier().show_toast(
-        "MARK Reminder",
-        "{safe_message}",
-        duration=15,
-        threaded=False
-    )
-except Exception:
-    try:
-        import subprocess
-        subprocess.run(["msg", "*", "/TIME:30", "{safe_message}"], shell=True)
-    except Exception:
-        pass
-
-time.sleep(3)
-try:
-    os.remove(__file__)
-except Exception:
-    pass
-'''
-        with open(notify_script, "w", encoding="utf-8") as f:
-            f.write(script_code)
-
-        xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>MARK Reminder: {safe_message}</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <TimeTrigger>
-      <StartBoundary>{target_dt.strftime("%Y-%m-%dT%H:%M:%S")}</StartBoundary>
-      <Enabled>true</Enabled>
-    </TimeTrigger>
-  </Triggers>
-  <Actions>
-    <Exec>
-      <Command>{python_exe}</Command>
-      <Arguments>"{notify_script}"</Arguments>
-    </Exec>
-  </Actions>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <WakeToRun>true</WakeToRun>
-    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
-    <Enabled>true</Enabled>
-  </Settings>
-  <Principals>
-    <Principal>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-</Task>'''
-
-        xml_path = os.path.join(temp_dir, f"{task_name}.xml")
-        with open(xml_path, "w", encoding="utf-16") as f:
-            f.write(xml_content)
-
-        result = subprocess.run(
-            f'schtasks /Create /TN "{task_name}" /XML "{xml_path}" /F',
-            shell=True, capture_output=True, text=True
-        )
-
-        try:
-            os.remove(xml_path)
-        except Exception:
-            pass
-
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            print(f"[Reminder] ❌ schtasks failed: {err}")
-            try:
-                os.remove(notify_script)
-            except Exception:
-                pass
-            return "I couldn't schedule the reminder due to a system error."
-
-        if player:
-            player.write_log(f"[reminder] set for {date_str} {time_str}")
-
-        return f"Reminder set for {target_dt.strftime('%B %d at %I:%M %p')}."
+        return f"Unknown reminder action: {action}"
 
     except ValueError:
-        return "I couldn't understand that date or time format."
-
+        return "I couldn't understand that date or time, sir."
     except Exception as e:
-        return f"Something went wrong while scheduling the reminder: {str(e)[:80]}"
+        return f"Something went wrong with the reminder: {str(e)[:80]}"

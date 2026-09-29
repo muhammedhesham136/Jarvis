@@ -1,10 +1,13 @@
 # actions/open_app.py
 # JARVIS — Cross-Platform App Launcher
 
+import os
+import re
 import time
 import subprocess
 import platform
 import shutil
+from pathlib import Path
 
 try:
     import psutil
@@ -89,7 +92,122 @@ def _is_running(app_name: str) -> bool:
     return False
 
 
+# ── Installed-app discovery (Windows) ────────────────────────────────────────
+# Typing into the Start menu is a gamble: the search can rank something else
+# first. Instead, look the app up in the shortcuts and Store apps Windows
+# itself lists, and start exactly that.
+
+_START_DIRS = (
+    Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
+    Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+)
+_startapps_cache: list[tuple[str, str]] | None = None
+
+
+def _clean(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+
+def best_match(query: str, names: list[str]) -> str | None:
+    """Pick the installed-app name that best fits what the user said."""
+    q = _clean(query)
+    if not q:
+        return None
+    scored = []
+    for name in names:
+        n = _clean(name)
+        if not n or "uninstall" in n:
+            continue
+        if n == q:
+            score = 100
+        elif q in n.split() or f" {q} " in f" {n} ":
+            score = 90 - min(len(n), 40) * 0.5      # whole word: "Visual Studio Code"
+        elif n.startswith(q):
+            score = 60 - min(len(n) - len(q), 30) * 0.5
+        elif q in n:
+            score = 40
+        elif n in q:
+            score = 30
+        else:
+            continue
+        scored.append((score, -len(n), name))
+    return max(scored)[2] if scored else None
+
+
+def _shortcuts() -> dict[str, str]:
+    found: dict[str, str] = {}
+    for base in _START_DIRS:
+        if not base.is_dir():
+            continue
+        for lnk in base.rglob("*.lnk"):
+            found.setdefault(lnk.stem, str(lnk))
+    return found
+
+
+def _start_apps() -> list[tuple[str, str]]:
+    """(name, AppID) for every app Windows lists, including Store apps."""
+    global _startapps_cache
+    if _startapps_cache is None:
+        _startapps_cache = []
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-StartApps | ForEach-Object { $_.Name + '|' + $_.AppID }"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            for line in out.splitlines():
+                name, _, app_id = line.strip().partition("|")
+                if name and app_id:
+                    _startapps_cache.append((name, app_id))
+        except Exception:
+            pass
+    return _startapps_cache
+
+
+def _launch_installed_windows(query: str) -> bool:
+    lnks = _shortcuts()
+    hit = best_match(query, list(lnks))
+    if hit:
+        try:
+            os.startfile(lnks[hit])
+            time.sleep(2.0)
+            return True
+        except Exception as e:
+            print(f"[open_app] shortcut launch failed: {e}")
+
+    apps = dict(_start_apps())
+    hit = best_match(query, list(apps))
+    if hit:
+        try:
+            subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{apps[hit]}"])
+            time.sleep(2.0)
+            return True
+        except Exception as e:
+            print(f"[open_app] Store app launch failed: {e}")
+    return False
+
+
 def _launch_windows(app_name: str) -> bool:
+    # Registered command (chrome, code, notepad.exe), URI (ms-settings:), or
+    # anything Windows can resolve by name.
+    if app_name.endswith(":"):
+        try:
+            os.startfile(app_name)
+            return True
+        except Exception:
+            pass
+    if shutil.which(app_name):
+        try:
+            subprocess.Popen([shutil.which(app_name)])
+            time.sleep(1.5)
+            return True
+        except Exception:
+            pass
+
+    if _launch_installed_windows(app_name):
+        return True
+
+    # Last resort: drive the Start menu.
     try:
         import pyautogui
         pyautogui.PAUSE = 0.1

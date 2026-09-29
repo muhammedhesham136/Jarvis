@@ -3,6 +3,10 @@ config/api_keys.json
 
 # Personal long-term memory
 memory/long_term.json
+memory/reminders.json
+memory/email_state.json
+memory/outlook_state.json
+memory/proactive_state.json
 
 # Environments and caches
 .venv/
@@ -21,3 +25,6 @@ _backup_original/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Browser profile used by browser_control (cookies, history, sessions)
+.browser_profile/
