@@ -24,3 +24,6 @@ _backup_original/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Browser profile used by browser_control (cookies, history, sessions)
+.browser_profile/
