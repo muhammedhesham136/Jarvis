@@ -7,6 +7,9 @@ memory/long_term.json
 # Email watcher's last-seen UID
 config/.email_state.json
 
+# Live browser profile — cookies, history, saved logins, wallet storage
+.browser_profile/
+
 # Environments and caches
 .venv/
 venv/
