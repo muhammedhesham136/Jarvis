@@ -37,10 +37,29 @@ _HOSTS = {
 }
 
 SETUP_HELP = (
-    "Email isn't set up yet, sir. Add email_address and email_password (an app "
-    "password, not your normal one) to config/api_keys.json. For Gmail, turn on "
-    "2-step verification and create an app password at myaccount.google.com/apppasswords."
+    "I can't reach your email, sir. If you use the Outlook desktop app I read it "
+    "directly — install pywin32 and turn off 'New Outlook'. Otherwise add "
+    "email_address and email_password (an app password, not your normal one) to "
+    "config/api_keys.json. For Gmail, turn on 2-step verification and create one "
+    "at myaccount.google.com/apppasswords."
 )
+
+
+def _backend() -> str | None:
+    """'imap' when a login is configured (or forced), else local 'outlook', else None."""
+    try:
+        forced = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("email_backend")
+    except Exception:
+        forced = None
+    if forced == "outlook":
+        return "outlook"
+    if forced == "imap" or is_configured():
+        return "imap" if is_configured() else None
+    try:
+        from actions import outlook_mail
+        return "outlook" if outlook_mail.is_available() else None
+    except Exception:
+        return None
 
 
 # ── Config / connections ─────────────────────────────────────────────────────
@@ -157,6 +176,9 @@ def new_since_last_check(limit: int = 5) -> dict | None:
     For the background watcher: unread mail that arrived since the last call.
     The first call only sets a baseline, so a full inbox is not announced.
     """
+    if _backend() == "outlook":
+        from actions import outlook_mail
+        return outlook_mail.new_since_last_check(limit)
     cfg = _cfg()
     if not cfg or not is_configured():
         return None
@@ -186,6 +208,9 @@ def new_since_last_check(limit: int = 5) -> dict | None:
 
 
 def unread_count() -> int | None:
+    if _backend() == "outlook":
+        from actions import outlook_mail
+        return outlook_mail.unread_count()
     cfg = _cfg()
     if not cfg or not is_configured():
         return None
@@ -303,6 +328,29 @@ def _send(cfg: dict, to: str, subject: str, body: str, confirm: bool) -> str:
     return f"Email sent to {to}, sir."
 
 
+def _outlook(action: str, p: dict, limit: int, confirm: bool, player) -> str:
+    from actions import outlook_mail as ol
+    try:
+        if player:
+            player.write_log(f"[email/outlook] {action}")
+        if action == "check":
+            return ol.check(limit)
+        if action == "read":
+            return ol.read(str(p.get("uid") or ""))
+        if action == "search":
+            return ol.search(str(p.get("query") or ""), limit)
+        if action == "reply":
+            return ol.reply(str(p.get("uid") or ""), p.get("body") or "", confirm)
+        if action == "send":
+            return ol.send(str(p.get("to") or "").strip(), p.get("subject") or "",
+                           p.get("body") or "", confirm)
+        return f"Unknown email action: {action}"
+    except ol.OutlookUnavailable:
+        return ol.NOT_AVAILABLE
+    except Exception as e:
+        return f"Something went wrong reading Outlook: {str(e)[:80]}"
+
+
 def email_assistant(parameters: dict, response=None, player=None, session_memory=None) -> str:
     """
     parameters:
@@ -313,12 +361,16 @@ def email_assistant(parameters: dict, response=None, player=None, session_memory
     """
     p      = parameters or {}
     action = str(p.get("action") or "check").lower()
-    cfg    = _cfg()
-    if not cfg or not is_configured():
+    backend = _backend()
+    if not backend:
         return SETUP_HELP
 
     limit   = max(1, min(int(p.get("limit") or 5), 15))
     confirm = str(p.get("confirm", "")).lower() in ("true", "1", "yes")
+
+    if backend == "outlook":
+        return _outlook(action, p, limit, confirm, player)
+    cfg = _cfg()
 
     try:
         if player:

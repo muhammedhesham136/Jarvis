@@ -73,8 +73,14 @@ who matters to you — and carries that between sessions.
 
 ### Email, reminders and the briefing
 
-Add your mail login to `config/api_keys.json` (Gmail, Outlook, Yahoo and iCloud
-work out of the box; use an **app password**, not your normal one — for Gmail
+**Local, no password (default):** if you use the classic **Outlook desktop app**
+JARVIS reads and answers that mailbox directly through Windows — nothing to set
+up beyond `pip install -r requirements.txt` (turn off *New Outlook*, which has no
+automation support).
+
+**Any other mail:** add your mail login to `config/api_keys.json` (Gmail, Outlook,
+Yahoo and iCloud work out of the box; use an **app password**, not your normal
+one — for Gmail
 turn on 2-step verification, then create one at
 [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)):
 
