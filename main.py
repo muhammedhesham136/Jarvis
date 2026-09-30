@@ -588,6 +588,21 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "recent_activity",
+        "description": (
+            "What JARVIS has recently run on this machine, from its activity log. "
+            "Use when the user asks what you just did, what changed, or whether "
+            "something was declined."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "count": {"type": "NUMBER", "description": "How many entries (default 5)"}
+            },
+            "required": []
+        }
+    },
+    {
         "name": "where_am_i",
         "description": (
             "Reports which applications and windows are open on the desktop right "
@@ -761,6 +776,17 @@ class JarvisLive:
                 print(f"[Memory] {args.get('category')}/{key} = {value}")
             return types.FunctionResponse(
                 id=fc.id, name=name, response={"result": "ok", "silent": True}
+            )
+
+        if name == "recent_activity":
+            from core import safety
+            rows = safety.recent(int(args.get("count") or 5))
+            result = "\n".join(
+                f"{r['time']} {r['tool']}: {r['what'][:120]} -> "
+                f"{'DECLINED' if r['approved'] is False else r['outcome'][:100]}"
+                for r in rows) or "Nothing has been logged yet, sir."
+            return types.FunctionResponse(
+                id=fc.id, name=name, response={"result": result}
             )
 
         # where_am_i reads the live window list — instant, read-only.

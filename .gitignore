@@ -6,6 +6,7 @@ memory/long_term.json
 memory/reminders.json
 memory/email_state.json
 memory/outlook_state.json
+memory/activity.jsonl
 memory/proactive_state.json
 
 # Environments and caches

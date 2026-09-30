@@ -20,6 +20,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from core import safety
+
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -102,14 +104,22 @@ def run_command(parameters: dict | None = None, player=None, **_kw) -> str:
     if not command:
         return "No command was given."
 
-    if _DESTRUCTIVE.search(command) and not p.get("confirm_destructive"):
-        return (
-            "That command would erase a disk or the boot configuration, so I "
-            "have held it back. Say it again and confirm explicitly if you "
-            "truly want it run."
-        )
+    wipe    = bool(_DESTRUCTIVE.search(command))
+    reasons = (["ERASE A DISK OR THE BOOT CONFIGURATION — this cannot be undone"]
+               if wipe else safety.risks(command))
+    approved = safety.approve("a command", command, reasons, hard=wipe)
+    if not approved:
+        safety.log("run_command", command, "declined", reasons, False)
+        return ("The user did not approve that, so nothing was run or changed. "
+                "Tell them plainly; do not retry it another way.")
 
     _log(player, f"CMD: {command[:110]}")
+    result = _run_shell(command, shell, timeout)
+    safety.log("run_command", command, result, reasons, True if reasons else None)
+    return result
+
+
+def _run_shell(command: str, shell: str, timeout: int) -> str:
 
     if shell.startswith("cmd"):
         argv = ["cmd.exe", "/c", command]
@@ -270,6 +280,12 @@ def do_anything(parameters: dict | None = None, player=None, speak=None, **_kw) 
             last_error = "The model returned an empty program."
             continue
 
+        reasons = safety.risks(code)
+        if reasons and not safety.approve("a program for: " + goal, goal, reasons):
+            safety.log("do_anything", goal, "declined", reasons, False)
+            return ("The user did not approve that, so nothing was run or changed. "
+                    "Tell them plainly; do not retry it another way.")
+
         path = _write_script(code)
         _log(player, f"RUN: attempt {attempt} — {path.name}")
 
@@ -290,6 +306,8 @@ def do_anything(parameters: dict | None = None, player=None, speak=None, **_kw) 
 
         if rc == 0:
             _log(player, f"OK on attempt {attempt}")
+            safety.log("do_anything", goal, out or "Done.", reasons,
+                       True if reasons else None)
             return _trim(out or "Done.")
 
         last_error = err or out or f"Exit code {rc}."
@@ -300,6 +318,7 @@ def do_anything(parameters: dict | None = None, player=None, speak=None, **_kw) 
             except Exception:
                 pass
 
+    safety.log("do_anything", goal, f"failed: {last_error}")
     return _trim(
         f"I tried {MAX_REPAIRS} approaches and none completed. "
         f"The last error was: {last_error}", 600
